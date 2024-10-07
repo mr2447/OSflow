@@ -9,6 +9,7 @@
 #include <cstring>
 using namespace std;
 
+
 const string ERROR = "Syntax of flow file incorrect";
 
 struct Node {
@@ -34,15 +35,36 @@ struct Flow {
     vector<Concatenate> concats; // Collection of concatenation operations
 };
 
+void executeNode(const Node& node);
+void executePipe(vector<Pipe>& pipes, const Pipe& Pipe, vector<Node>& nodes, vector<Concatenate>& concatenates);
+void executeConcantenate(const Concatenate& concat, vector<Node>& nodes, vector<Pipe>& pipes, vector<Concatenate>& concatenates);
+
+bool isNode(const std::string& name, const std::vector<Node>& nodes) {
+    for (const auto& node : nodes) {
+        if (node.name == name) {
+            return true; // Found a matching node
+        }
+    }
+    return false; // No matching node found
+}
+
+bool isPipe(const std::string& name, const std::vector<Pipe>& pipes) {
+    for (const auto& pipe : pipes) {
+        if (pipe.name == name) {
+            return true; // Found a matching pipe
+        }
+    }
+    return false; // No matching pipe found
+}
+
 // Function to read the file and print its contents
-void readFile(const string& fileName, vector<Node>& nodes, vector<Pipe>& pipes, vector<Concatenate>& concatenates) {
+int readFile(const string& fileName, vector<Node>& nodes, vector<Pipe>& pipes, vector<Concatenate>& concatenates) {
     // Open file
     ifstream file(fileName);
 
     // Check if the file was opened successfully
     if (!file.is_open()) {
-        cerr << "Error: Could not open file " << fileName << endl;
-        return;
+        return 1;
     }
 
     bool nodeFlag = 0, pipeFlag = 0, concatFlag = 0;
@@ -71,7 +93,6 @@ void readFile(const string& fileName, vector<Node>& nodes, vector<Pipe>& pipes, 
         } else if (line.compare(0, 6, "parts=") == 0) {
             currCat.parts = stoi(line.substr(6)); // Capture number of parts
             currCat.part_names.resize(currCat.parts); // Resize vector for part names
-            cout << currCat.part_names.size() << endl;
         } else if (line.compare(0, 5, "part_") == 0) {
             int idx = stoi(line.substr(5, 1)); // Assumes part index is a single digit
             currCat.part_names[idx] = line.substr(line.find('=') + 1); // Capture part name
@@ -83,6 +104,30 @@ void readFile(const string& fileName, vector<Node>& nodes, vector<Pipe>& pipes, 
 
     // Close the file
     file.close();
+
+    return 0; 
+}
+
+void executeConcantenate(const Concatenate& concat, vector<Node>& nodes, vector<Pipe>& pipes, vector<Concatenate>& concatenates){
+    for (const auto& partName : concat.part_names) {
+        if(isNode(partName, nodes)){
+            for (const auto& node : nodes) {
+                if (node.name == partName) {
+                    executeNode(node);
+                    break;
+            }
+        }
+        }
+        else if (isPipe(partName, pipes)) {
+            // Execute pipe
+            for (const auto& pipe : pipes) {
+                if (pipe.name == partName) {
+                    executePipe(pipes, pipe, nodes, concatenates);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 // Function to execute a command in a node
@@ -91,9 +136,28 @@ void executeNode(const Node& node) {
     pid_t pid = fork();
 
     if (pid == 0) { // Child process
-        // Execute the command
-        if (execlp(node.command.c_str(), node.command.c_str(), nullptr) < 0) {
-            perror("execlp failed"); // Print error if exec fails
+        // Split the command into program and arguments
+        char* args[100];  // Array to hold the arguments
+        std::string command = node.command;
+        std::istringstream iss(command);
+        std::string arg;
+        int i = 0;
+
+        // Parse the command into arguments
+        while (iss >> arg) {
+            // Remove single quotes if they exist around the argument
+            if (arg.front() == '\'' && arg.back() == '\'') {
+                arg = arg.substr(1, arg.size() - 2);
+            }
+            args[i] = new char[arg.size() + 1]; // Allocate memory
+            std::strcpy(args[i], arg.c_str());  // Copy the argument
+            i++;
+        }
+        args[i] = nullptr; // Null-terminate the array
+
+        // Execute the command with execvp (since args is an array)
+        if (execvp(args[0], args) < 0) {
+            perror("execvp failed"); // Print error if execvp fails
             exit(1); // Exit child process on failure
         }
     } else if (pid < 0) {
@@ -102,8 +166,9 @@ void executeNode(const Node& node) {
         waitpid(pid, nullptr, 0); // Parent process waits for child to finish
     }
 }
+
 // Function to execute a pipe between two nodes
-void executePipe(const Pipe& Pipe, const std::vector<Node>& nodes) {
+void executePipe(vector<Pipe>& pipes, const Pipe& Pipe, vector<Node>& nodes, vector<Concatenate>& concatenates) {
     pid_t p1 = fork();
     if (p1 == 0) { // First child process
         // Create a pipe
@@ -123,6 +188,12 @@ void executePipe(const Pipe& Pipe, const std::vector<Node>& nodes) {
                     break;
                 }
             }
+            for(const auto& concatenate : concatenates){
+                if (concatenate.name == Pipe.from){
+                    executeConcantenate(concatenate, nodes, pipes, concatenates);
+                    break;
+                }
+            }
             exit(0);
         }
 
@@ -135,6 +206,12 @@ void executePipe(const Pipe& Pipe, const std::vector<Node>& nodes) {
             for (const auto& node : nodes) {
                 if (node.name == Pipe.to) {
                     executeNode(node);
+                    break;
+                }
+            }
+            for(const auto& concatenate : concatenates){
+                if (concatenate.name == Pipe.to){
+                    executeConcantenate(concatenate, nodes, pipes, concatenates);
                     break;
                 }
             }
@@ -165,12 +242,31 @@ int main(int argc, char *argv[]) {
     vector<Pipe> pipes;
     vector<Concatenate> concatenates;
 
-    readFile(argv[1], nodes, pipes, concatenates);
+    if(readFile(flowFile, nodes, pipes, concatenates) == 1){
+        cerr << "Error: Could not open file " << flowFile << endl;
+        return 1;
+    }
 
     // Execute the specified action
     for (const auto& pipe : pipes) {
         if (pipe.name == action) {
-            executePipe(pipe, nodes);
+            executePipe(pipes, pipe, nodes, concatenates);
+            break;
+        }
+    }
+
+    // Execute the specified action
+    for (const auto& node : nodes) {
+        if (node.name == action) {
+            executeNode(node);
+            break;
+        }
+    }
+
+    // Check if the action refers to a concatenate
+    for (const auto& concat : concatenates) {
+        if (concat.name == action) {
+            executeConcantenate(concat, nodes, pipes, concatenates);
             break;
         }
     }
@@ -200,3 +296,6 @@ int main(int argc, char *argv[]) {
     // }
 
 return 0;}
+
+
+
