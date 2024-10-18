@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <fstream>
 #include <sstream>
@@ -23,39 +24,21 @@ struct Pipe {
 };
 
 struct Concatenate {
-    string name;              // Unique name for the concatenate operation
-    int parts;                // Number of parts
-    vector<string> part_names; // Names of the parts (nodes/pipes)
+    string name;
+    int parts;
+    vector<string> part_names;
 };
 
 struct Flow {
-    vector<Node> nodes;       // Collection of nodes
-    vector<Pipe> pipes;       // Collection of pipes
-    vector<Concatenate> concats; // Collection of concatenation operations
+    unordered_map<string, Node> nodes;         // Map of nodes
+    unordered_map<string, Pipe> pipes;         // Map of pipes
+    unordered_map<string, Concatenate> concats; // Map of concatenates
 };
 
 // Function prototypes
 void executeNode(const Node& node);
 void executePipe(Flow& flow, const Pipe& pipe);
 void executeConcatenate(const Concatenate& concat, Flow& flow);
-
-bool isNode(const string& name, const Flow& flow) {
-    for (const auto& node : flow.nodes) {
-        if (node.name == name) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool isPipe(const string& name, const Flow& flow) {
-    for (const auto& pipe : flow.pipes) {
-        if (pipe.name == name) {
-            return true;
-        }
-    }
-    return false;
-}
 
 // Function to read the flow file and populate the Flow structure
 int readFile(const string& fileName, Flow& flow) {
@@ -75,14 +58,14 @@ int readFile(const string& fileName, Flow& flow) {
             currNode.name = line.substr(5);
         } else if (line.compare(0, 8, "command=") == 0) {
             currNode.command = line.substr(8);
-            flow.nodes.push_back(currNode);
+            flow.nodes[currNode.name] = currNode; // Store in the unordered_map
         } else if (line.compare(0, 5, "pipe=") == 0) {
             currPipe.name = line.substr(5);
         } else if (line.compare(0, 5, "from=") == 0) {
             currPipe.from = line.substr(5);
         } else if (line.compare(0, 3, "to=") == 0) {
             currPipe.to = line.substr(3);
-            flow.pipes.push_back(currPipe);
+            flow.pipes[currPipe.name] = currPipe; // Store in the unordered_map
         } else if (line.compare(0, 12, "concatenate=") == 0) {
             currCat.name = line.substr(12);
         } else if (line.compare(0, 6, "parts=") == 0) {
@@ -92,7 +75,7 @@ int readFile(const string& fileName, Flow& flow) {
             int idx = stoi(line.substr(5, 1));
             currCat.part_names[idx] = line.substr(line.find('=') + 1);
             if (idx + 1 == currCat.part_names.size()) {
-                flow.concats.push_back(currCat);
+                flow.concats[currCat.name] = currCat; // Store in the unordered_map
             }
         }
     }
@@ -103,20 +86,10 @@ int readFile(const string& fileName, Flow& flow) {
 
 void executeConcatenate(const Concatenate& concat, Flow& flow) {
     for (const auto& partName : concat.part_names) {
-        if (isNode(partName, flow)) {
-            for (const auto& node : flow.nodes) {
-                if (node.name == partName) {
-                    executeNode(node);
-                    break;
-                }
-            }
-        } else if (isPipe(partName, flow)) {
-            for (const auto& pipe : flow.pipes) {
-                if (pipe.name == partName) {
-                    executePipe(flow, pipe);
-                    break;
-                }
-            }
+        if (flow.nodes.find(partName) != flow.nodes.end()) {
+            executeNode(flow.nodes[partName]);
+        } else if (flow.pipes.find(partName) != flow.pipes.end()) {
+            executePipe(flow, flow.pipes[partName]);
         }
     }
 }
@@ -165,18 +138,10 @@ void executePipe(Flow& flow, const Pipe& pipe) {
             close(fd[0]);
             close(fd[1]);
 
-            for (const auto& node : flow.nodes) {
-                if (node.name == pipe.from) {
-                    executeNode(node);
-                    break;
-                }
-            }
-
-            for (const auto& concat : flow.concats) {
-                if (concat.name == pipe.from) {
-                    executeConcatenate(concat, flow);
-                    break;
-                }
+            if (flow.nodes.find(pipe.from) != flow.nodes.end()) {
+                executeNode(flow.nodes[pipe.from]);
+            } else if (flow.concats.find(pipe.from) != flow.concats.end()) {
+                executeConcatenate(flow.concats[pipe.from], flow);
             }
             exit(0);
         }
@@ -187,18 +152,10 @@ void executePipe(Flow& flow, const Pipe& pipe) {
             close(fd[1]);
             close(fd[0]);
 
-            for (const auto& node : flow.nodes) {
-                if (node.name == pipe.to) {
-                    executeNode(node);
-                    break;
-                }
-            }
-
-            for (const auto& concat : flow.concats) {
-                if (concat.name == pipe.to) {
-                    executeConcatenate(concat, flow);
-                    break;
-                }
+            if (flow.nodes.find(pipe.to) != flow.nodes.end()) {
+                executeNode(flow.nodes[pipe.to]);
+            } else if (flow.concats.find(pipe.to) != flow.concats.end()) {
+                executeConcatenate(flow.concats[pipe.to], flow);
             }
             exit(0);
         }
@@ -229,25 +186,14 @@ int main(int argc, char* argv[]) {
     }
 
     // Execute the specified action
-    for (const auto& pipe : flow.pipes) {
-        if (pipe.name == action) {
-            executePipe(flow, pipe);
-            break;
-        }
-    }
-
-    for (const auto& node : flow.nodes) {
-        if (node.name == action) {
-            executeNode(node);
-            break;
-        }
-    }
-
-    for (const auto& concat : flow.concats) {
-        if (concat.name == action) {
-            executeConcatenate(concat, flow);
-            break;
-        }
+    if (flow.pipes.find(action) != flow.pipes.end()) {
+        executePipe(flow, flow.pipes[action]);
+    } else if (flow.nodes.find(action) != flow.nodes.end()) {
+        executeNode(flow.nodes[action]);
+    } else if (flow.concats.find(action) != flow.concats.end()) {
+        executeConcatenate(flow.concats[action], flow);
+    } else {
+        cerr << "Action not found." << endl;
     }
 
     return 0;
