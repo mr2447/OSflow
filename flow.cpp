@@ -1,12 +1,16 @@
 #include <iostream>
-#include <string>
-#include <vector>
-#include <fstream>
-#include <sstream>
-#include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <unistd.h>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <sstream>
+#include <fstream>
 #include <cstring>
+#include <fcntl.h>
+
+
 using namespace std;
 
 const string ERROR = "Syntax of flow file incorrect";
@@ -23,15 +27,15 @@ struct Pipe {
 };
 
 struct Concatenate {
-    string name;              // Unique name for the concatenate operation
-    int parts;                // Number of parts
-    vector<string> part_names; // Names of the parts (nodes/pipes)
+    string name;
+    int parts;
+    vector<string> part_names;
 };
 
 struct Flow {
-    vector<Node> nodes;       // Collection of nodes
-    vector<Pipe> pipes;       // Collection of pipes
-    vector<Concatenate> concats; // Collection of concatenation operations
+    unordered_map<string, Node> nodes;         // Map of nodes
+    unordered_map<string, Pipe> pipes;         // Map of pipes
+    unordered_map<string, Concatenate> concats; // Map of concatenates
 };
 
 // Function prototypes
@@ -39,22 +43,40 @@ void executeNode(const Node& node);
 void executePipe(Flow& flow, const Pipe& pipe);
 void executeConcatenate(const Concatenate& concat, Flow& flow);
 
-bool isNode(const string& name, const Flow& flow) {
-    for (const auto& node : flow.nodes) {
-        if (node.name == name) {
-            return true;
-        }
-    }
-    return false;
-}
 
-bool isPipe(const string& name, const Flow& flow) {
-    for (const auto& pipe : flow.pipes) {
-        if (pipe.name == name) {
-            return true;
+
+void executeConcatenate(const Concatenate& concat, Flow& flow) {
+    
+    for (int i = 0; i < concat.parts; i++) {
+        // Fork a new child process for each part
+        pid_t p = fork();
+        if (p == -1) {
+            perror("fork failed");
+            exit(1);
         }
+
+        if (p == 0) {
+            // Child process (for each part)
+            const std::string& partName = concat.part_names[i];  // Get the current part's name
+
+            if (flow.nodes.find(partName) != flow.nodes.end()) {
+                executeNode(flow.nodes[partName]);  // Execute node (e.g., cat foo.txt)
+            } else if (flow.pipes.find(partName) != flow.pipes.end()) {
+                executePipe(flow, flow.pipes[partName]);  // Execute pipe if it's a pipe
+            } else if (flow.concats.find(partName) != flow.concats.end()) {
+                executeConcatenate(flow.concats[partName], flow);  // Nested concatenate
+            }
+
+            exit(0);  // Exit child process after execution
+        }
+
+        // Parent process does not wait for the child immediately, allowing all children to run concurrently
     }
-    return false;
+
+    // Parent process waits for all children to complete
+    for (int i = 0; i < concat.parts; i++) {
+        wait(nullptr);  // Wait for each child to finish
+    }
 }
 
 // Function to read the flow file and populate the Flow structure
@@ -75,14 +97,14 @@ int readFile(const string& fileName, Flow& flow) {
             currNode.name = line.substr(5);
         } else if (line.compare(0, 8, "command=") == 0) {
             currNode.command = line.substr(8);
-            flow.nodes.push_back(currNode);
+            flow.nodes[currNode.name] = currNode; // Store in the unordered_map
         } else if (line.compare(0, 5, "pipe=") == 0) {
             currPipe.name = line.substr(5);
         } else if (line.compare(0, 5, "from=") == 0) {
             currPipe.from = line.substr(5);
         } else if (line.compare(0, 3, "to=") == 0) {
             currPipe.to = line.substr(3);
-            flow.pipes.push_back(currPipe);
+            flow.pipes[currPipe.name] = currPipe; // Store in the unordered_map
         } else if (line.compare(0, 12, "concatenate=") == 0) {
             currCat.name = line.substr(12);
         } else if (line.compare(0, 6, "parts=") == 0) {
@@ -92,35 +114,17 @@ int readFile(const string& fileName, Flow& flow) {
             int idx = stoi(line.substr(5, 1));
             currCat.part_names[idx] = line.substr(line.find('=') + 1);
             if (idx + 1 == currCat.part_names.size()) {
-                flow.concats.push_back(currCat);
+                flow.concats[currCat.name] = currCat; // Store in the unordered_map
             }
         }
     }
-
     file.close();
     return 0;
 }
 
-void executeConcatenate(const Concatenate& concat, Flow& flow) {
-    for (const auto& partName : concat.part_names) {
-        if (isNode(partName, flow)) {
-            for (const auto& node : flow.nodes) {
-                if (node.name == partName) {
-                    executeNode(node);
-                    break;
-                }
-            }
-        } else if (isPipe(partName, flow)) {
-            for (const auto& pipe : flow.pipes) {
-                if (pipe.name == partName) {
-                    executePipe(flow, pipe);
-                    break;
-                }
-            }
-        }
-    }
-}
 
+
+// Function to execute a node
 void executeNode(const Node& node) {
     pid_t pid = fork();
 
@@ -132,19 +136,26 @@ void executeNode(const Node& node) {
         int i = 0;
 
         while (iss >> arg) {
+            // If the argument is wrapped in single quotes, remove the quotes
             if (arg.front() == '\'' && arg.back() == '\'') {
-                arg = arg.substr(1, arg.size() - 2);
+                arg = arg.substr(1, arg.size() - 2);  // Strip the quotes
             }
+
+            // Store the argument in args[] array
             args[i] = new char[arg.size() + 1];
             strcpy(args[i], arg.c_str());
             i++;
         }
-        args[i] = nullptr;
+        args[i] = nullptr;  // Null-terminate the argument list
 
+        // Execute the command
         if (execvp(args[0], args) < 0) {
             perror("execvp failed");
             exit(1);
         }
+
+        // Flush stdout to ensure all output is printed before exit
+        fflush(stdout);
     } else if (pid < 0) {
         perror("fork failed");
     } else {
@@ -152,64 +163,100 @@ void executeNode(const Node& node) {
     }
 }
 
-void executePipe(Flow& flow, const Pipe& pipe) {
-    pid_t p1 = fork();
-
-    if (p1 == 0) {
-        int fd[2];
-        ::pipe(fd);
-
-        pid_t p2 = fork();
-        if (p2 == 0) {
-            dup2(fd[1], STDOUT_FILENO); // Redirect stdout to pipe
-            close(fd[0]);
-            close(fd[1]);
-
-            for (const auto& node : flow.nodes) {
-                if (node.name == pipe.from) {
-                    executeNode(node);
-                    break;
-                }
-            }
-
-            for (const auto& concat : flow.concats) {
-                if (concat.name == pipe.from) {
-                    executeConcatenate(concat, flow);
-                    break;
-                }
-            }
-            exit(0);
-        }
-
-        pid_t p3 = fork();
-        if (p3 == 0) {
-            dup2(fd[0], STDIN_FILENO); // Redirect stdin from pipe
-            close(fd[1]);
-            close(fd[0]);
-
-            for (const auto& node : flow.nodes) {
-                if (node.name == pipe.to) {
-                    executeNode(node);
-                    break;
-                }
-            }
-
-            for (const auto& concat : flow.concats) {
-                if (concat.name == pipe.to) {
-                    executeConcatenate(concat, flow);
-                    break;
-                }
-            }
-            exit(0);
-        }
-
-        close(fd[0]);
-        close(fd[1]);
-        waitpid(p2, nullptr, 0);
-        waitpid(p3, nullptr, 0);
-    } else if (p1 < 0) {
-        perror("fork failed");
+// Function to execute a pipe between two nodes or concatenates
+// Function to execute a pipe between two nodes or concatenates
+void executePipe(Flow& flow, const Pipe& pipeStruct) {
+    int fd1[2], fd2[2];
+    if (pipe(fd1) == -1 || pipe(fd2) == -1) {
+        perror("pipeStruct failed");
+        exit(1);
     }
+
+
+    // First child process (p2) for 'from' part of the pipe
+    pid_t p2 = fork();
+    // printf("Fork returned: %d\n", p2);
+    // fflush(stdout);  // Force the output to flush
+
+    if (p2 == -1) {
+        perror("fork failed for p2");
+        exit(1);
+    }
+
+    if (p2 == 0) {
+        // printf("In child process p2\n");
+        // fflush(stdout);  // Force output in child to flush
+
+        // Child process for 'from' side of the pipe (p2)
+        dup2(fd1[1], STDOUT_FILENO);  // Redirect stdout to the pipe's write end
+        close(fd1[0]);  // Close unused read end
+        close(fd1[1]);  // Close write end after dup2
+
+        const string& from = pipeStruct.from;
+
+        // Check if 'from' is a node, pipe, or concatenate
+        if (flow.nodes.find(from) != flow.nodes.end()) {
+            // fprintf(stderr, "Debug: In child process p2: %s \n", flow.nodes[from].name.c_str());
+            // fflush(stderr);  // Flush stderr, since it's not redirected
+            executeNode(flow.nodes[from]);  // Execute node (e.g., cat foo.txt)
+        } else if (flow.pipes.find(from) != flow.pipes.end()) {
+            executePipe(flow, flow.pipes[from]);  // Recursive call to executePipe()
+        } else if (flow.concats.find(from) != flow.concats.end()) {
+            executeConcatenate(flow.concats[from], flow);  // Execute concatenate
+        }
+
+        exit(0);  // Exit child process after execution
+    }
+
+    // Parent waits for the first child to finish
+    waitpid(p2, nullptr, 0);
+
+    // Second child process (p3) for 'to' part of the pipe
+    pid_t p3 = fork();
+    // printf("Fork returned: %d\n", p3);
+    // fflush(stdout);  // Force the output to flush
+
+    if (p3 == -1) {
+        perror("fork failed for p3");
+        exit(1);
+    }
+
+    if (p3 == 0) {
+        // printf("In child process p3\n");
+        // fflush(stdout);  // Force output in child to flush
+
+        // Child process for 'to' side of the pipe (p3)
+        dup2(fd1[0], STDIN_FILENO);  // Redirect stdin to the pipe's read end (from p2)
+        close(fd1[1]);  // Close unused write end of fd1
+        close(fd1[0]);  // Close read end of fd1 after dup2
+
+        // No need for dup2(fd2[1], STDOUT_FILENO) -- p3 outputs directly to the terminal
+
+        const string& to = pipeStruct.to;
+
+        // Check if 'to' is a node, pipe, or concatenate
+        if (flow.nodes.find(to) != flow.nodes.end()) {
+            // printf("We found pipe action: %s\n", flow.nodes[to].command.c_str());
+            // fflush(stdout);
+            executeNode(flow.nodes[to]);  // Execute node (e.g., sed 's/o/u/g')
+        } else if (flow.pipes.find(to) != flow.pipes.end()) {
+            executePipe(flow, flow.pipes[to]);  // Recursive call to executePipe()
+        } else if (flow.concats.find(to) != flow.concats.end()) {
+            executeConcatenate(flow.concats[to], flow);  // Execute concatenate
+        }
+
+        exit(0);  // Exit child process after execution
+    }
+
+    // Parent process closes unused ends
+    close(fd1[0]);
+    close(fd1[1]);
+    close(fd2[1]);  // Close write end of fd2 (used by p3)
+
+    // Wait for both children to finish
+    waitpid(p3, nullptr, 0);
+
+    close(fd2[0]);  // Close the read end of the second pipe after reading
 }
 
 int main(int argc, char* argv[]) {
@@ -229,25 +276,14 @@ int main(int argc, char* argv[]) {
     }
 
     // Execute the specified action
-    for (const auto& pipe : flow.pipes) {
-        if (pipe.name == action) {
-            executePipe(flow, pipe);
-            break;
-        }
-    }
-
-    for (const auto& node : flow.nodes) {
-        if (node.name == action) {
-            executeNode(node);
-            break;
-        }
-    }
-
-    for (const auto& concat : flow.concats) {
-        if (concat.name == action) {
-            executeConcatenate(concat, flow);
-            break;
-        }
+    if (flow.pipes.find(action) != flow.pipes.end()) {
+        executePipe(flow, flow.pipes[action]);
+    } else if (flow.nodes.find(action) != flow.nodes.end()) {
+        executeNode(flow.nodes[action]);
+    } else if (flow.concats.find(action) != flow.concats.end()) {
+        executeConcatenate(flow.concats[action], flow);
+    } else {
+        cerr << "Action not found." << endl;
     }
 
     return 0;
