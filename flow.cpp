@@ -55,90 +55,55 @@ void printCapturedOutput(int fd) {
 }
 
 void executeConcatenate(const Concatenate& concat, Flow& flow) {
-    int fd[2];  // Pipe for capturing combined output between parts
+    int fd[2];  // Pipe for capturing the combined output of all parts
     if (pipe(fd) == -1) {
         perror("pipe failed");
         exit(1);
     }
 
-    // First child process for part_0 (e.g., cat foo.txt)
-    pid_t p2 = fork();
-    if (p2 == -1) {
-        perror("fork failed for part_0");
-        exit(1);
-    }
-
-    if (p2 == 0) {
-        // Child process 1 (part_0)
-        dup2(fd[1], STDOUT_FILENO);  // Redirect stdout to pipe's write end
-        close(fd[0]);  // Close unused read end of the pipe
-        close(fd[1]);  // Close write end after dup2
-
-        const string& partName = concat.part_names[0];  // First part
-        // printf("Executing part_0: %s\n", partName.c_str());
-        // fflush(stdout);  // Ensure the output is flushed immediately
-
-        if (flow.nodes.find(partName) != flow.nodes.end()) {
-            executeNode(flow.nodes[partName]);  // Execute node (e.g., cat foo.txt)
-        } else if (flow.pipes.find(partName) != flow.pipes.end()) {
-            executePipe(flow, flow.pipes[partName]);  // Execute pipe if it's a pipe
-        } else if (flow.concats.find(partName) != flow.concats.end()) {
-            executeConcatenate(flow.concats[partName], flow);  // Nested concatenate
+    for (int i = 0; i < concat.parts; i++) {
+        // Fork a new child process for each part
+        pid_t p = fork();
+        if (p == -1) {
+            perror("fork failed");
+            exit(1);
         }
 
-        // Ensure a newline is printed after the first part's output
-        // printf("\n");
-        exit(0);  // Exit child process after execution
-    }
+        if (p == 0) {
+            // Child process (for each part)
+            // Redirect stdout to the pipe's write end for all parts
+            dup2(fd[1], STDOUT_FILENO);  // Redirect stdout to the pipe
+            close(fd[0]);  // Close unused read end of the pipe
+            close(fd[1]);  // Close write end after dup2
 
-    // Parent waits for the first child (part_0) to complete before starting part_1
-    waitpid(p2, nullptr, 0);  // Ensure part_0 finishes
+            const string& partName = concat.part_names[i];  // Get the current part's name
 
-    // Second child process for part_1 (e.g., sed 's/o/u/g')
-    pid_t p3 = fork();
-    if (p3 == -1) {
-        perror("fork failed for part_1");
-        exit(1);
-    }
+            if (flow.nodes.find(partName) != flow.nodes.end()) {
+                executeNode(flow.nodes[partName]);  // Execute node (e.g., cat foo.txt)
+            } else if (flow.pipes.find(partName) != flow.pipes.end()) {
+                executePipe(flow, flow.pipes[partName]);  // Execute pipe if it's a pipe
+            } else if (flow.concats.find(partName) != flow.concats.end()) {
+                executeConcatenate(flow.concats[partName], flow);  // Nested concatenate
+            }
 
-    if (p3 == 0) {
-        // Child process 2 (part_1)
-        dup2(fd[1], STDOUT_FILENO);  // Redirect stdout to pipe's write end
-        close(fd[0]);  // Close unused read end of the pipe
-        close(fd[1]);  // Close write end after dup2
-
-        const string& partName = concat.part_names[1];  // Second part
-        // printf("Executing part_1: %s\n", partName.c_str());
-        // fflush(stdout);  // Ensure the output is flushed immediately
-
-        if (flow.nodes.find(partName) != flow.nodes.end()) {
-            executeNode(flow.nodes[partName]);  // Execute node (e.g., sed 's/o/u/g')
-        } else if (flow.pipes.find(partName) != flow.pipes.end()) {
-            executePipe(flow, flow.pipes[partName]);  // Execute pipe if it's a pipe
-        } else if (flow.concats.find(partName) != flow.concats.end()) {
-            executeConcatenate(flow.concats[partName], flow);  // Nested concatenate
+            exit(0);  // Exit child process after execution
         }
 
-        // Ensure a newline is printed after the second part's output
-        // printf("\n");
-        exit(0);  // Exit child process after execution
+        // Parent process waits for the current child to complete
+        waitpid(p, nullptr, 0);
     }
 
-    // Parent process closes unused pipe ends
-    close(fd[1]);  // Close write end in the parent (used by children)
+    // Parent process: after all parts are done, output the combined results of all parts to stdout
+    close(fd[1]);  // Close the write end in the parent (only reading now)
 
-    // Wait for both child processes to complete
-    waitpid(p3, nullptr, 0);  // Wait for part_1 to finish
+    // Redirect the concatenated output to stdout (which can then be piped into another command)
+    char buffer[1024];
+    ssize_t bytesRead;
 
-    // Now read the combined output from the first and second parts
-    // printf("\nReading combined output of all parts:\n");
-    printCapturedOutput(fd[0]);  // This will capture both the outputs from the pipe
-    close(fd[0]);  // Close the read end of the pipe after reading
-
-    // Print the combined output being passed to wc (simulated, for debugging)
-    // printf("\nCombined output passed to wc:\n");
-    fflush(stdout);
-    printCapturedOutput(fd[0]);  // Ensure we're reading from the correct fd, not stdin
+    // Read the combined output from the pipe and write it to stdout using write()
+    while ((bytesRead = read(fd[0], buffer, sizeof(buffer))) > 0) {
+        write(STDOUT_FILENO, buffer, bytesRead);  // Output the buffer content to stdout
+    }
 
     close(fd[0]);  // Close the read end of the pipe after reading
 }
